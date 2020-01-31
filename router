@@ -144,12 +144,14 @@ class Router:
     # check if there is an entry in the forwarding table yet
     # replace the entry if new path is the best path
     if (self.routes.get(packet["msg"]["network"]) == None):
-      self.routes[packet["msg"]["network"]] == packet
+      self.routes[packet["msg"]["network"]] = packet
     elif (self.isBestPath(packet, self.routes[packet["msg"]["network"]])):
-      self.routes[packet["msg"]["network"]] == packet
+      self.routes[packet["msg"]["network"]] = packet
 
     # TODO
+
     print(self.updates)
+    print(self.routes)
 
     return False
 
