@@ -150,8 +150,8 @@ class Router:
 
     # TODO
 
-    print(self.updates)
-    print(self.routes)
+    print("UPDATES DICTONARY: %s \n" % self.updates)
+    print("ROUTES DICTIONARY: %s \n" % self.routes)
 
     return False
 
@@ -195,7 +195,11 @@ class Router:
       return False
 
     # RETURN LOWER IP ADDRESS
-    return newPacket["src"] < oldPacket["src"]
+
+    # TODOTODOTODOTODOTODO
+    newIP = ipaddress.IPv4Address(newPacket[src])
+    oldIP = ipaddress.IPv4Address(oldPacket[src])
+    return (newIP < oldIP)
 
 
 
