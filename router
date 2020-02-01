@@ -6,6 +6,8 @@ import json
 import select
 import socket
 
+import ipaddress
+
 
 ##########################################################################################
 
@@ -42,21 +44,23 @@ PROV = "prov"
 class Router:
   """ Your Router """
 
-  def __init__(self, networks):
+  def __init__(self, asn, networks):
+    # the asn from command line
+    self.asn = asn
+    # key: network ip address we can send to -> val: update message
     self.routes = {}
+    # key: port/src ip address -> val: [update messages]
     self.updates = {}
+    # key: port/src ip address -> val: one of CUST PEER PROV
     self.relations = {}
+    # key: port/src ip address -> val: literally the socket
     self.sockets = {}
     for relationship in networks:
-      print(relationship)
-      print("HERE")
       network, relation = relationship.split("-")
       self.sockets[network] = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
       self.sockets[network].setblocking(0)
       self.sockets[network].connect(network)
       self.relations[network] = relation
-      print(self.sockets)
-      print(self.relations)
 
   def lookup_routes(self, daddr):
     """ Lookup all valid routes for an address """
@@ -124,10 +128,80 @@ class Router:
     # TODO (this is the most difficult task, save until last)
     return False
 
+
+
+    # handles getting an update message, checks if new path is better
+    # than old, updates forwarding table accordingly
   def update(self, srcif, packet):
     """ handle update packets """
+    # check if updates map has seen the source ip yet
+    # adds the packet message to the list of updates
+    if (self.updates.get(srcif) == None):
+      self.updates[srcif] = [packet]
+    else:
+      self.updates[srcif].append(packet)
+
+    # check if there is an entry in the forwarding table yet
+    # replace the entry if new path is the best path
+    if (self.routes.get(packet["msg"]["network"]) == None):
+      self.routes[packet["msg"]["network"]] = packet
+    elif (self.isBestPath(packet, self.routes[packet["msg"]["network"]])):
+      self.routes[packet["msg"]["network"]] = packet
+
     # TODO
+
+    print("UPDATES DICTONARY: %s \n" % self.updates)
+    print("ROUTES DICTIONARY: %s \n" % self.routes)
+
     return False
+
+  # compares the new path with the old path
+  # returns true if new is better
+  # false if old is better
+  def isBestPath(self, newPacket, oldPacket):
+    # CHECK FOR HIGHEST LOCAL PATH
+    if (newPacket[msg][localpref] > oldPacket[msg][localpref]):
+      return True
+    elif (newPacket[msg][localpref] < oldPacket[msg][localpref]):
+      return False
+    # CHECK FOR ORIGIN
+    if (newPacket[msg][selfOrigin] and not(oldPacket[msg][selfOrigin])):
+      return True
+    elif (not(newPacket[msg][selfOrigin]) and oldPacket[msg][selfOrigin]):
+      return False
+
+    # CHECK ASPATH
+    if (len(newPacket[msg][ASPATH]) < len(oldPacket[msg][ASPATH])):
+      return True
+    elif (len(newPacket[msg][ASPATH]) > len(oldPacket[msg][ASPATH])):
+      return False
+
+    # CHECK ORIGIN IGP
+    if ((newPacket[msg][origin] == "IGP") and (not(oldPacket[msg][origin]) == "IGP")):
+      return True
+    elif ((not(newPacket[msg][origin]) == "IGP") and (oldPacket[msg][origin] == "IGP")):
+      return False
+
+    # CHECK ORIGIN EGP
+    if ((newPacket[msg][origin] == "EGP") and (not(oldPacket[msg][origin]) == "EGP")):
+      return True
+    elif ((not(newPacket[msg][origin]) == "EGP") and (oldPacket[msg][origin] == "EGP")):
+      return False
+
+    # CHECK ORIGIN UNK
+    if ((newPacket[msg][origin] == "UNK") and (not(oldPacket[msg][origin]) == "UNK")):
+      return True
+    elif ((not(newPacket[msg][origin]) == "UNK") and (oldPacket[msg][origin] == "UNK")):
+      return False
+
+    # RETURN LOWER IP ADDRESS
+
+    # TODOTODOTODOTODOTODO
+    newIP = ipaddress.IPv4Address(newPacket[src])
+    oldIP = ipaddress.IPv4Address(oldPacket[src])
+    return (newIP < oldIP)
+
+
 
   def revoke(self, packet):
     """ handle revoke packets """
@@ -141,6 +215,12 @@ class Router:
 
   def handle_packet(self, srcif, packet):
     """ dispatches a packet """
+    msgType = packet['type']
+
+    if (msgType == 'update'):
+      self.update(srcif, packet)
+
+
     # TODO
     return False
 
@@ -166,14 +246,12 @@ class Router:
           msg = json.loads(k)
           if not self.handle_packet(srcif, msg):
             self.send_error(conn, msg)
-
-          print(msg['type'])
         else:
           return
 
 if __name__ == "__main__":
   PARSER = argparse.ArgumentParser(description='route packets')
-  PARSER.add_argument('ASN', metavar="asn", type=int, nargs=1, help="asn")
+  PARSER.add_argument('asn', metavar="asn", type=int, nargs=1, help="asn")
   PARSER.add_argument('networks', metavar='networks', type=str, nargs='+', help="networks")
   ARGS = PARSER.parse_args()
-  Router(ARGS.networks).run()
+  Router(ARGS.asn, ARGS.networks).run()
