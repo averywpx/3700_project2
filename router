@@ -241,16 +241,17 @@ class Router:
     # replace the entry if new path is the best path
     if (self.routes.get(networkAddress) == None):
       self.routes[networkAddress] = packet["src"]
-      self.routesAndUpdates[networkAddress] = packet
-    elif (self.isBestPath(packet, self.routesAndUpdates[networkAddress])):
-      print("I AM HERE")
+      self.routesAndUpdates[networkAddress] = [packet]
+    elif (self.isBestPath(packet, self.routesAndUpdates[networkAddress][0])):
       self.routes[networkAddress] = packet["src"]
-      self.routesAndUpdates[networkAddress] = packet
+      self.routesAndUpdates[networkAddress].insert(0, packet)
+    else:
+      self.routesAndUpdates[networkAddress].append(packet)
 
     # forward the update
     self.forwardUpdate(srcif, packet)
-    print("FORWARDING TABLE: %s" % self.routes)
     return False
+
 
   # calculates a network address using the given netmask
   def calculateNetAddress(self, address, mask):
@@ -272,19 +273,20 @@ class Router:
   # Forwards an udapte packet to the correct ports
   def forwardUpdate(self, srcif, packet):
     # add ourselves to the as path
-    packet["msg"]["ASPath"].append(self.asn)
+    newPacket = {"type": "update", "src": None, "dst": None, "msg": packet["msg"]}
+    newPacket["msg"]["ASPath"].append(self.asn)
     ogSrc = packet["src"]
     # check if sender was a customer
     if (self.relations[ogSrc] == CUST):
       # send to all other sockets
       for key in self.sockets:
         if key != srcif:
-          packet["dst"] = key
+          newPacket["dst"] = key
           keyTemp = key.split(".")
           keyTemp[-1] = "1"
           keyTemp = ".".join(keyTemp)
-          packet["src"] = keyTemp
-          packetJSON = json.dumps(packet)
+          newPacket["src"] = keyTemp
+          packetJSON = json.dumps(newPacket)
           packetJSON = packetJSON.encode("ASCII")
           self.sockets[key].send(packetJSON)
 
@@ -292,12 +294,12 @@ class Router:
     else:
       for key in self.relations:
         if (self.relations[key] == CUST) and (key != srcif):
-          packet["dst"] = key
+          newPacket["dst"] = key
           keyTemp = key.split(".")
           keyTemp[-1] = "1"
           keyTemp = ".".join(keyTemp)
-          packet["src"] = keyTemp
-          packetJSON = json.dumps(packet)
+          newPacket["src"] = keyTemp
+          packetJSON = json.dumps(newPacket)
           packetJSON = packetJSON.encode("ASCII")
           self.sockets[key].send(packetJSON)
 
@@ -313,9 +315,6 @@ class Router:
     ASPATH = 'ASPath'
     origin = 'origin'
 
-    print(type(newPacket))
-    print(type(oldPacket))
-    print(type(newPacket[msg][localpref]))
 
     # CHECK FOR HIGHEST LOCAL PATH
     if (newPacket[msg][localpref] > oldPacket[msg][localpref]):
@@ -370,12 +369,13 @@ class Router:
     """ handles dump table requests """
     fowardTable = []
 
-    for key in self.routes:
+    for key in self.routesAndUpdates:
       network, cidr = key.split("/")
-      netmask = str(IPv4Network(key).netmask)
-      peer = self.routes[key]
-      entry = {"network": network, "netmask": netmask, "peer": peer}
-      fowardTable.append(entry)
+      for i in range(len(self.routesAndUpdates[key])):
+        netmask = self.routesAndUpdates[key][i]["msg"]["netmask"]
+        peer = self.routesAndUpdates[key][i]["src"]
+        entry = {"network": network, "netmask": netmask, "peer": peer}
+        fowardTable.append(entry)
 
     # TODO
     dumpMsg = {"src": packet["dst"], "dst": packet["src"], "type": "table", "msg": fowardTable}
@@ -388,7 +388,7 @@ class Router:
   def handle_packet(self, srcif, packet):
     """ dispatches a packet """
 
-    print("PACKET RECIEVED: %s" % packet)
+    #print("PACKET RECIEVED: %s" % packet)
     msgType = packet['type']
 
     if (msgType == 'update'):
