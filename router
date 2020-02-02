@@ -55,6 +55,8 @@ class Router:
     self.routesAndUpdates = {}
     # key: port/src ip address -> val: [update messages]
     self.updates = {}
+    # key: port/src ip addres -> val: [revoke messages]
+    self.revokes = {}
     # key: port/src ip address -> val: one of CUST PEER PROV
     self.relations = {}
     # key: port/src ip address -> val: literally the socket
@@ -209,8 +211,8 @@ class Router:
     ports = {}
 
     for key in self.routes:
-      #network, mask = knownNetworks[i].split("/")
-      #splitNetwork = knownNetworks[i].split(".")
+      # network, mask = knownNetworks[i].split("/")
+      # splitNetwork = knownNetworks[i].split(".")
       if ipaddress.ip_address(dstAddress) in ipaddress.ip_network(key):
         ports[key] = self.routes.get(key)
 
@@ -223,8 +225,8 @@ class Router:
 
 
 
-    # handles getting an update message, checks if new path is better
-    # than old, updates forwarding table accordingly
+  # handles getting an update message, checks if new path is better
+  # than old, updates forwarding table accordingly
   def update(self, srcif, packet):
     """ handle update packets """
     # check if updates map has seen the source ip yet
@@ -241,16 +243,31 @@ class Router:
     # replace the entry if new path is the best path
     if (self.routes.get(networkAddress) == None):
       self.routes[networkAddress] = packet["src"]
-      self.routesAndUpdates[networkAddress] = [packet]
     elif (self.isBestPath(packet, self.routesAndUpdates[networkAddress][0])):
       self.routes[networkAddress] = packet["src"]
-      self.routesAndUpdates[networkAddress].insert(0, packet)
-    else:
-      self.routesAndUpdates[networkAddress].append(packet)
+      # place updates in order from best to worst
+    self.placeUpdateInOrder(networkAddress, packet)
 
     # forward the update
     self.forwardUpdate(srcif, packet)
     return False
+
+  # places an update message in order in the list of update messages (best first)
+  def placeUpdateInOrder(self, networkAddress, packet):
+    # first check for no key yet
+    if self.routesAndUpdates.get(networkAddress) == None:
+      self.routesAndUpdates[networkAddress] = [packet]
+      return True
+
+    for i in range(len(self.routesAndUpdates[networkAddress])):
+      if self.isBestPath(packet, self.routesAndUpdates[networkAddress][i]):
+        self.routesAndUpdates[networkAddress].insert(i, packet)
+        return True
+
+    # was the worst so far, goes at end
+    self.routesAndUpdates[networkAddress].append(packet)
+
+    return True
 
 
   # calculates a network address using the given netmask
@@ -281,28 +298,16 @@ class Router:
       # send to all other sockets
       for key in self.sockets:
         if key != srcif:
-          newPacket["dst"] = key
-          keyTemp = key.split(".")
-          keyTemp[-1] = "1"
-          keyTemp = ".".join(keyTemp)
-          newPacket["src"] = keyTemp
-          packetJSON = json.dumps(newPacket)
-          packetJSON = packetJSON.encode("ASCII")
-          self.sockets[key].send(packetJSON)
+          self.sendPacketHelper(newPacket, key)
 
     # must have beena PEER or PROV
     else:
       for key in self.relations:
         if (self.relations[key] == CUST) and (key != srcif):
-          newPacket["dst"] = key
-          keyTemp = key.split(".")
-          keyTemp[-1] = "1"
-          keyTemp = ".".join(keyTemp)
-          newPacket["src"] = keyTemp
-          packetJSON = json.dumps(newPacket)
-          packetJSON = packetJSON.encode("ASCII")
-          self.sockets[key].send(packetJSON)
+          self.sendPacketHelper(newPacket, key)
 
+    # undo modification of aspath
+    del packet["msg"]["ASPath"][-1]
 
 
     # compares the new path with the old path
@@ -360,10 +365,92 @@ class Router:
 
 
 
-  def revoke(self, packet):
+  def revoke(self, packet, srcif):
     """ handle revoke packets """
-    # TODO
+    # store the revoke message
+    print("FORWARD TABLE BEFORE REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
+    if (self.revokes.get(srcif) == None):
+      self.revokes[srcif] = [packet]
+    else:
+      self.revokes[srcif].append(packet)
+
+    # iterate thorugh revoke list, remove them from possible paths
+    for i in range(len(packet["msg"])):
+      self.removePath(packet["msg"][i], srcif)
+
+
+    print("FORWARD TABLE AFTER REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
+    # forward the revocation
+    self.forwardRevoke(srcif, packet)
+
     return True
+
+  # remove one element from the list of revokes
+  def removePath(self, network, srcif):
+    # get CIDR format
+    networkAddress = self.calculateNetAddress(network["network"], network["netmask"])
+
+    # exit/do nothing if there are no paths to this network yet
+    if self.routesAndUpdates.get(networkAddress) == None:
+      return True
+
+    n = len(self.routesAndUpdates[networkAddress])
+    i = 0
+    # if the update came from the source of the revoke message, remove it
+    while i < n:
+      if self.routesAndUpdates[networkAddress][i]["src"] == srcif:
+        del self.routesAndUpdates[networkAddress][i]
+        n -= 1
+      else:
+        i += 1
+
+    # if length of list is now 0, remove the keys, exit function
+    if len(self.routesAndUpdates[networkAddress]) == 0:
+      del self.routesAndUpdates[networkAddress]
+      del self.routes[networkAddress]
+      return True
+
+
+    # if the best path so far is out the port that wants to revoke, find a new best path
+    # since routesAndUpdates is sorted and all from
+    # revoke port have been removed, first entry must be the best path
+    if self.routes[networkAddress] == srcif:
+      self.routes[networkAddress] = self.routesAndUpdates[networkAddress][0]["src"]
+
+    return True
+
+
+
+  # Forwards an udapte packet to the correct ports
+  def forwardRevoke(self, srcif, packet):
+    newPacket = {"type": "revoke", "src": None, "dst": None, "msg": packet["msg"]}
+    ogSrc = packet["src"]
+    # check if sender was a customer
+    if (self.relations[ogSrc] == CUST):
+      # send to all other sockets
+      for key in self.sockets:
+        if key != srcif:
+          self.sendPacketHelper(newPacket, key)
+
+    # must have been a PEER or PROV
+    else:
+      for key in self.relations:
+        if (self.relations[key] == CUST) and (key != srcif):
+          self.sendPacketHelper(newPacket, key)
+
+
+  def sendPacketHelper(self, newPacket, key):
+    newPacket["dst"] = key
+    keyTemp = key.split(".")
+    keyTemp[-1] = "1"
+    keyTemp = ".".join(keyTemp)
+    newPacket["src"] = keyTemp
+    packetJSON = json.dumps(newPacket)
+    packetJSON = packetJSON.encode("ASCII")
+    self.sockets[key].send(packetJSON)
+
+    return True
+
 
   def dump(self, packet, srcif):
     """ handles dump table requests """
@@ -388,7 +475,7 @@ class Router:
   def handle_packet(self, srcif, packet):
     """ dispatches a packet """
 
-    #print("PACKET RECIEVED: %s" % packet)
+    print("PACKET RECIEVED: %s" % json.dumps(packet, indent=4, separators=(',', ': ')))
     msgType = packet['type']
 
     if (msgType == 'update'):
@@ -399,6 +486,9 @@ class Router:
 
     if (msgType == 'dump'):
       self.dump(packet, srcif)
+
+    if (msgType == 'revoke'):
+      self.revoke(packet, srcif)
 
 
 
