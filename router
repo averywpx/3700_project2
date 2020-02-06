@@ -181,9 +181,9 @@ class Router:
     longestNetwork = ""
 
     for key in ports:
-      pref = key.split("/")[1]
+      pref = int(key.split("/")[1])
 
-      if int(pref) > longestPref:
+      if pref > longestPref:
         longestPref = pref
         longestNetwork = key
 
@@ -197,10 +197,15 @@ class Router:
   # filter based on neigbor relationships
   def filterRelationships(self, ports, srcif):
 
+    keysToRemove = []
+
     if self.relations[srcif] != CUST:
       for key in ports:
         if self.relations[ports[key]] != CUST:
-          del ports[key]
+          keysToRemove.append(key)
+
+    for key in keysToRemove:
+      del ports[key]
 
     return ports
 
@@ -368,7 +373,7 @@ class Router:
   def revoke(self, packet, srcif):
     """ handle revoke packets """
     # store the revoke message
-    print("FORWARD TABLE BEFORE REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
+    #print("FORWARD TABLE BEFORE REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
     if (self.revokes.get(srcif) == None):
       self.revokes[srcif] = [packet]
     else:
@@ -379,7 +384,7 @@ class Router:
       self.removePath(packet["msg"][i], srcif)
 
 
-    print("FORWARD TABLE AFTER REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
+    #print("FORWARD TABLE AFTER REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
     # forward the revocation
     self.forwardRevoke(srcif, packet)
 
@@ -475,7 +480,9 @@ class Router:
   def handle_packet(self, srcif, packet):
     """ dispatches a packet """
 
-    print("PACKET RECIEVED: %s" % json.dumps(packet, indent=4, separators=(',', ': ')))
+    # debug statement below
+    #print("PACKET RECIEVED: %s" % json.dumps(packet, indent=4, separators=(',', ': ')))
+
     msgType = packet['type']
 
     if (msgType == 'update'):
