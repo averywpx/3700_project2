@@ -7,7 +7,6 @@ import select
 import socket
 
 import ipaddress
-from ipaddress import IPv4Network
 
 
 ##########################################################################################
@@ -72,40 +71,6 @@ class Router:
       self.sockets[network].connect(network)
       self.relations[network] = relation
 
-  def lookup_routes(self, daddr):
-    """ Lookup all valid routes for an address """
-    # TODO
-    outroutes = []
-    return outroutes
-
-  def get_shortest_as_path(self, routes):
-    """ select the route with the shortest AS Path """
-    # TODO
-    outroutes = []
-    return outroutes
-
-  def get_highest_preference(self, routes):
-    """ select the route with the shortest AS Path """
-    # TODO
-    outroutes = []
-    return outroutes
-
-  def get_self_origin(self, routes):
-    """ select self originating routes """
-    # TODO
-    outroutes = []
-    return outroutes
-
-  def get_origin_routes(self, routes):
-    """ select origin routes: EGP > IGP > UNK """
-    # TODO
-    outroutes = []
-    return outroutes
-
-  def filter_relationships(self, srcif, routes):
-    """ Don't allow Peer->Peer, Peer->Prov, or Prov->Peer forwards """
-    outroutes = []
-    return outroutes
 
   def get_route(self, srcif, daddr):
     """ Select the best route for a given address """
@@ -132,7 +97,6 @@ class Router:
 
   def forward(self, srcif, packet):
     """ Forward a data packet """
-    # TODO
 
     # find all possible networks from forwarding table
     ports = self.allPossible(packet["dst"])
@@ -154,18 +118,23 @@ class Router:
 
   # forwards data to the sock
   def forwardData(self, sock, packet):
+    # pack into json and encode
     packetJSON = json.dumps(packet)
     packetJSON = packetJSON.encode("ASCII")
+    # send
     sock.send(packetJSON)
 
-    return False
+    return True
 
   # sends a no route back to the source
   def sendNoRoute(self, srcif, packet):
+    # split source ip into array, modify last digit to 1 (us)
     srcifSplit = srcif.split(".")
     srcifSplit[-1] = "1"
+    # put back together
     srcUs = ".".join(srcifSplit)
 
+    # create a no route message, pack into json, encode, send
     noRouteMessage = {"src": srcUs, "dst": packet["src"], "type": "no route", "msg": {}}
     packetJSON = json.dumps(noRouteMessage)
     packetJSON = packetJSON.encode("ASCII")
@@ -175,11 +144,14 @@ class Router:
 
   # returns socket for the highest prefix or none for nothing
   def getLongestPrefix(self, ports):
+    # initialize socket
     sock = None
 
+    # initialize variables
     longestPref = 0
     longestNetwork = ""
 
+    # iterate through matches, find longest cidr
     for key in ports:
       pref = int(key.split("/")[1])
 
@@ -187,23 +159,26 @@ class Router:
         longestPref = pref
         longestNetwork = key
 
+    # none were found
     if longestPref == 0:
       return None
 
+    # get the right socket
     sock = self.sockets[ports[longestNetwork]]
 
     return sock
 
   # filter based on neigbor relationships
   def filterRelationships(self, ports, srcif):
-
+    # accumulator
     keysToRemove = []
-
+    # if sender is not customer and reciever is not customer dont send
     if self.relations[srcif] != CUST:
       for key in ports:
         if self.relations[ports[key]] != CUST:
           keysToRemove.append(key)
 
+    # remove invalid relationships
     for key in keysToRemove:
       del ports[key]
 
@@ -263,7 +238,7 @@ class Router:
     if self.routesAndUpdates.get(networkAddress) == None:
       self.routesAndUpdates[networkAddress] = [packet]
       return True
-
+    # place in the new update in order of best route
     for i in range(len(self.routesAndUpdates[networkAddress])):
       if self.isBestPath(packet, self.routesAndUpdates[networkAddress][i]):
         self.routesAndUpdates[networkAddress].insert(i, packet)
@@ -444,12 +419,15 @@ class Router:
           self.sendPacketHelper(newPacket, key)
 
 
+  # helper method to send update and revoke packets
   def sendPacketHelper(self, newPacket, key):
+    # modify the packet (switch dst and src)
     newPacket["dst"] = key
     keyTemp = key.split(".")
     keyTemp[-1] = "1"
     keyTemp = ".".join(keyTemp)
     newPacket["src"] = keyTemp
+    # pack into json, encode, send
     packetJSON = json.dumps(newPacket)
     packetJSON = packetJSON.encode("ASCII")
     self.sockets[key].send(packetJSON)
@@ -459,8 +437,9 @@ class Router:
 
   def dump(self, packet, srcif):
     """ handles dump table requests """
+    # array accumulator to hold routes
     fowardTable = []
-
+    # iterate through table, print in correct format
     for key in self.routesAndUpdates:
       network, cidr = key.split("/")
       for i in range(len(self.routesAndUpdates[key])):
@@ -484,7 +463,7 @@ class Router:
     #print("PACKET RECIEVED: %s" % json.dumps(packet, indent=4, separators=(',', ': ')))
 
     msgType = packet['type']
-
+    # handle each type of message
     if (msgType == 'update'):
       self.update(srcif, packet)
 
@@ -497,9 +476,6 @@ class Router:
     if (msgType == 'revoke'):
       self.revoke(packet, srcif)
 
-
-
-    # TODO
     return False
 
   def send_error(self, conn, msg):
