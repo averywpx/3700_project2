@@ -7,6 +7,7 @@ import select
 import socket
 
 import ipaddress
+from ipaddress import IPv4Network
 
 
 ##########################################################################################
@@ -201,6 +202,128 @@ class Router:
   def coalesce(self):
     """ coalesce any routes that are right next to each other """
     # TODO (this is the most difficult task, save until last)
+
+    while(True):
+      aggregate = self.getCoalesce()
+      if (aggregate == None):
+
+        break
+
+      self.handleCoalesce(aggregate[0], aggregate[1])
+
+    return False
+
+  # returns true if the two cidrs can be aggregated just based on cidr
+  def canCoalesceKey(self, key1, key2):
+    # split keys into ips and cidr vals
+    ip1, cidr1 = key1.split("/")
+    ip2, cidr2 = key2.split("/")
+
+
+    # if the cidrs match then continue
+    if (cidr1 == cidr2):
+      # split into array of binary
+      bin1 = list(''.join(format(int(x), '08b') for x in ip1.split(".")))
+      bin2 = list(''.join(format(int(x), '08b') for x in ip2.split(".")))
+
+      # get index, we know cidrs are the same value, so same index for both
+      idx = int(cidr1) - 1
+
+
+      # check for numerical adjacency
+      if ((bin1[idx] == '1') and (bin2[idx] == '0')):
+        return True
+      if ((bin1[idx] == '0') and (bin2[idx] == '1')):
+        return True
+
+
+    return False
+
+
+  # returns true if the update messages have the same attributes
+  def sameAttributes(self, msg1, msg2):
+
+    return ((msg1['src'] == msg2['src']) and
+            (msg1['msg']['localpref'] == msg2['msg']['localpref']) and
+            (msg1['msg']['selfOrigin'] == msg2['msg']['selfOrigin']) and
+            (msg1['msg']['ASPath'] == msg2['msg']['ASPath']) and
+            (msg1['msg']['origin'] == msg2['msg']['origin']))
+
+
+
+  # returns [first cidr, second cidr] if something can coalesce, otherwise none
+  def getCoalesce(self):
+    for key1, value1 in self.routesAndUpdates.items():
+      for key2, value2 in self.routesAndUpdates.items():
+
+        # if networks are adjacent, return them
+        if (self.canCoalesceKey(key1, key2)):
+          for msg1 in value1:
+            for msg2 in value2:
+              if self.sameAttributes(msg1, msg2):
+                return [key1, key2]
+
+    return None
+
+  # do the coalesce
+  def handleCoalesce(self, key1, key2):
+
+    # GET THE NEW KEY, SET TO []
+    ip, cidr = key1.split("/")
+    binary = list(''.join(format(int(x), '08b') for x in ip.split(".")))
+    binary[int(cidr) - 1] = '0'
+    newipbinary = ''.join(binary)
+    groupsOfEight = [newipbinary[i: i + 8] for i in range(0, len(newipbinary), 8)]
+    for i in range(len(groupsOfEight)):
+      groupsOfEight[i] = str(int(groupsOfEight[i], 2))
+
+    # get new ip, cidr, key, and netmask
+    newIp = '.'.join(groupsOfEight)
+    newCidr = str(int(cidr) - 1)
+
+    newKey = newIp + '/' + newCidr
+
+    newNetmask = str(IPv4Network(newKey).netmask)
+
+    # save old versions of update list
+    updates1 = self.routesAndUpdates[key1]
+    updates2 = self.routesAndUpdates[key2]
+
+    # iterate through and find matching updates
+    for i in range(len(updates1)):
+      for j in range(len(updates2)):
+        if self.sameAttributes(updates1[i], updates2[j]):
+          # create the new update message, remove the old ones
+          newMsg = updates1[i]
+          newMsg['msg']['network'] = newIp
+          newMsg['msg']['netmask'] = newNetmask
+          self.placeUpdateInOrder(newKey, newMsg)
+          updates1.pop(i)
+          updates2.pop(j)
+
+          # set the old update lists to the new ones
+          self.routesAndUpdates[key1] = updates1
+          self.routesAndUpdates[key2] = updates2
+
+          # set routing table to best possible ports
+          self.routes[newKey] = self.routesAndUpdates[newKey][0]["src"]
+
+          if len(self.routesAndUpdates[key1]) == 0:
+            del self.routes[key1]
+            del self.routesAndUpdates[key1]
+          else:
+            self.routes[key1] = self.routesAndUpdates[key1][0]["src"]
+
+          if len(self.routesAndUpdates[key2]) == 0:
+            del self.routes[key2]
+            del self.routesAndUpdates[key2]
+          else:
+            self.routes[key2] = self.routesAndUpdates[key2][0]["src"]
+
+          return True
+
+
+    print("NO COALESCE HANDLED, ERROR IN GET COALESCE")
     return False
 
 
@@ -230,6 +353,10 @@ class Router:
 
     # forward the update
     self.forwardUpdate(srcif, packet)
+
+    # COALESCE
+    self.coalesce()
+
     return False
 
   # places an update message in order in the list of update messages (best first)
@@ -348,7 +475,7 @@ class Router:
   def revoke(self, packet, srcif):
     """ handle revoke packets """
     # store the revoke message
-    #print("FORWARD TABLE BEFORE REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
+    # print("FORWARD TABLE BEFORE REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
     if (self.revokes.get(srcif) == None):
       self.revokes[srcif] = [packet]
     else:
@@ -359,7 +486,7 @@ class Router:
       self.removePath(packet["msg"][i], srcif)
 
 
-    #print("FORWARD TABLE AFTER REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
+    # print("FORWARD TABLE AFTER REVOKE: %s" % json.dumps(self.routesAndUpdates, indent=4, separators=(',', ': ')))
     # forward the revocation
     self.forwardRevoke(srcif, packet)
 
@@ -448,9 +575,8 @@ class Router:
         entry = {"network": network, "netmask": netmask, "peer": peer}
         fowardTable.append(entry)
 
-    # TODO
+    
     dumpMsg = {"src": packet["dst"], "dst": packet["src"], "type": "table", "msg": fowardTable}
-
     packetJSON = json.dumps(dumpMsg)
     packetJSON = packetJSON.encode("ASCII")
     self.sockets[srcif].send(packetJSON)
@@ -460,7 +586,7 @@ class Router:
     """ dispatches a packet """
 
     # debug statement below
-    #print("PACKET RECIEVED: %s" % json.dumps(packet, indent=4, separators=(',', ': ')))
+    # print("PACKET RECIEVED: %s" % json.dumps(packet, indent=4, separators=(',', ': ')))
 
     msgType = packet['type']
     # handle each type of message
