@@ -242,7 +242,7 @@ class Router:
 
   # returns true if the update messages have the same attributes
   def sameAttributes(self, msg1, msg2):
-
+    # compare all attributes and return
     return ((msg1['src'] == msg2['src']) and
             (msg1['msg']['localpref'] == msg2['msg']['localpref']) and
             (msg1['msg']['selfOrigin'] == msg2['msg']['selfOrigin']) and
@@ -326,7 +326,29 @@ class Router:
     print("NO COALESCE HANDLED, ERROR IN GET COALESCE")
     return False
 
+  # handles getting an update message WITHOUT SENDING MESSAGE, checks if new path is better
+  # than old, updates forwarding table accordingly
+  # ALSO DOES NOT ADD TO THE UPDATE TABLE
+  # FOR INTERNAL USE ONLY IN REVOKE V2
+  def updateNoMSG(self, srcif, packet):
+    """ handle update packets """
 
+    # get the network address by using the netmask
+    networkAddress = self.calculateNetAddress(packet["msg"]["network"], packet["msg"]["netmask"])
+
+    # check if there is an entry in the forwarding table yet
+    # replace the entry if new path is the best path
+    if (self.routes.get(networkAddress) == None):
+      self.routes[networkAddress] = packet["src"]
+    elif (self.isBestPath(packet, self.routesAndUpdates[networkAddress][0])):
+      self.routes[networkAddress] = packet["src"]
+      # place updates in order from best to worst
+    self.placeUpdateInOrder(networkAddress, packet)
+
+    # coalesce
+    self.coalesce()
+
+    return False
 
   # handles getting an update message, checks if new path is better
   # than old, updates forwarding table accordingly
@@ -354,25 +376,30 @@ class Router:
     # forward the update
     self.forwardUpdate(srcif, packet)
 
-    # COALESCE
+    # coalesce
     self.coalesce()
 
     return False
 
   # places an update message in order in the list of update messages (best first)
   def placeUpdateInOrder(self, networkAddress, packet):
+    # MAKE A COPY OF THE PACKET TO AVOID MUTATION DURING COALESCE
+    newPacket = {"type": "update", "src": packet["src"], "dst": packet["dst"],
+                 "msg": {"network": packet["msg"]["network"], "netmask": packet["msg"]["netmask"],
+                         "localpref": packet["msg"]["localpref"], "ASPath": packet["msg"]["ASPath"],
+                         "origin": packet["msg"]["origin"], "selfOrigin": packet["msg"]["selfOrigin"]}}
     # first check for no key yet
     if self.routesAndUpdates.get(networkAddress) == None:
-      self.routesAndUpdates[networkAddress] = [packet]
+      self.routesAndUpdates[networkAddress] = [newPacket]
       return True
     # place in the new update in order of best route
     for i in range(len(self.routesAndUpdates[networkAddress])):
-      if self.isBestPath(packet, self.routesAndUpdates[networkAddress][i]):
-        self.routesAndUpdates[networkAddress].insert(i, packet)
+      if self.isBestPath(newPacket, self.routesAndUpdates[networkAddress][i]):
+        self.routesAndUpdates[networkAddress].insert(i, newPacket)
         return True
 
     # was the worst so far, goes at end
-    self.routesAndUpdates[networkAddress].append(packet)
+    self.routesAndUpdates[networkAddress].append(newPacket)
 
     return True
 
@@ -465,10 +492,43 @@ class Router:
 
     # RETURN LOWER IP ADDRESS
 
-    # TODOTODOTODOTODOTODO
     newIP = ipaddress.IPv4Address(newPacket['src'])
     oldIP = ipaddress.IPv4Address(oldPacket['src'])
     return (newIP < oldIP)
+
+  # revoke that deals with deaggregation
+  # deletes forwarding tables
+  # rebuilds from the stored update messages.
+  # deletes update messages that are revoked.
+  def revokeV2(self, packet, srcif):
+    self.routes = {}
+    self.routesAndUpdates = {}
+
+
+    # iterate and remove all necessary update messages
+    for i in range(len(packet["msg"])):
+      network = packet["msg"][i]["network"]
+      netmask = packet["msg"][i]["netmask"]
+
+      # store idxs to delete
+      toDelete = []
+
+      # iterate through, if network address matches then we need to remove it
+      for j in range(len(self.updates[srcif])):
+        if (self.updates[srcif][j]["msg"]["network"] == network) and (self.updates[srcif][j]["msg"]["netmask"] == netmask):
+          toDelete.append(j)
+
+      # delete store idxs
+      for k in range(len(toDelete)):
+        self.updates[srcif].pop(toDelete[k])
+
+    # parse all updates and add them to the forwarding table
+    for key in self.updates:
+      for val in self.updates[key]:
+        self.updateNoMSG(val["src"], val)
+
+    self.forwardRevoke(srcif, packet)
+    return True
 
 
 
@@ -526,6 +586,9 @@ class Router:
 
     return True
 
+  # checks for possible deaggregation and handles it accordingly, does not remove old
+  # routing table entry (handled later in remove path)
+  # def checkDeaggregate
 
 
   # Forwards an udapte packet to the correct ports
@@ -575,7 +638,7 @@ class Router:
         entry = {"network": network, "netmask": netmask, "peer": peer}
         fowardTable.append(entry)
 
-    
+
     dumpMsg = {"src": packet["dst"], "dst": packet["src"], "type": "table", "msg": fowardTable}
     packetJSON = json.dumps(dumpMsg)
     packetJSON = packetJSON.encode("ASCII")
@@ -592,22 +655,27 @@ class Router:
     # handle each type of message
     if (msgType == 'update'):
       self.update(srcif, packet)
+      return True
 
     if (msgType == 'data'):
       self.forward(srcif, packet)
+      return True
 
     if (msgType == 'dump'):
       self.dump(packet, srcif)
+      return True
 
     if (msgType == 'revoke'):
-      self.revoke(packet, srcif)
+      self.revokeV2(packet, srcif)
+      return True
 
     return False
 
   def send_error(self, conn, msg):
-    """ Send a no_route error message """
-    # TODO
-    return
+    msg = json.dumps(msg)
+    msg = msg.encode("ASCII")
+    conn.send(msg)
+    return False
 
   def run(self):
     """ main loop for the router """
