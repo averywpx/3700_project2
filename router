@@ -49,9 +49,9 @@ class Router:
   def __init__(self, asn, networks):
     # the asn from command line
     self.asn = asn[0]
-    # key: network ip address we can send to -> val: port ip to send out
+    # key: network ip address we can send to -> val: best port ip to send out
     self.routes = {}
-    # key: network ip address we can send to -> val: update that came with it
+    # key: network ip address we can send to -> val: list of update (ordered by best path)
     self.routesAndUpdates = {}
     # key: port/src ip address -> val: [update messages]
     self.updates = {}
